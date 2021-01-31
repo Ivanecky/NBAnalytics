@@ -1,0 +1,521 @@
+---
+title: "NBAnalytics"
+output: html_document
+---
+
+# Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidymodels)
+library(httr)
+library(dplyr)
+library(jsonlite)
+library(RPostgreSQL)
+library(DBI)
+library(RSQLite)
+library(ggrepel)
+library(ggimage)
+library(gganimate)
+library(plotly)
+library(ggthemes)
+library(ggpubr)
+library(reshape2)
+library(rpart)
+library(party)
+library(maptree)
+library(C50)
+library(partykit)
+library(randomForest)
+library(forecast)
+library(yaml)
+
+library(reticulate)
+py_config()
+
+# Setup Python
+reticulate::use_virtualenv("~/samivanecky/git/nba/nbar/")
+
+# Read connection data from yaml
+yml <- read_yaml("postgres.yaml")
+
+# Connect to postgres
+pg <- dbConnect(
+  RPostgres::Postgres(),
+  db = yml$database,
+  host = yml$host,
+  user = yml$user,
+  port = yml$port
+)
+```
+
+# Query Data from Postgres
+
+Data is written from an online NBA API into a local Postgres database for ease of access. This code can be found in a Jupyter noteook titled `NBA - Data Query`.
+
+```{r}
+# Get NBA games data
+games <- dbGetQuery(pg, "select * from games")
+
+# Drop any dups
+games <- games[!duplicated(games), ]
+```
+
+# Data Cleaning & Manipulations
+
+```{r}
+# Season & Wins
+games <- games %>%
+  mutate(
+    season = as.numeric(SEASON_ID),
+    WL_num = case_when(
+      WL == 'W' ~ 1,
+      T ~ 0
+    )
+  ) %>%
+  mutate(
+    home_away = case_when(
+      grepl("@", MATCHUP) ~ 'AWAY',
+      T ~ 'HOME'
+    )
+  )
+```
+
+```{r}
+nba <- games %>%
+  arrange(TEAM_ABBREVIATION, season, GAME_DATE) %>%
+  group_by(TEAM_ABBREVIATION, season) %>%
+  mutate(
+    GAME_num = 1
+  ) %>%
+  mutate(
+    GAMES_PLAYED = cumsum(GAME_num),
+    WINS = cumsum(WL_num)
+  ) %>%
+  mutate(
+    LOSSES = GAMES_PLAYED - WINS,
+    WIN_PCT = round(WINS / GAMES_PLAYED, 3)
+  )
+```
+
+## Split Into Home & Away
+
+```{r}
+home <- nba %>% filter(home_away == "HOME")
+away <- nba %>% filter(home_away == "AWAY")
+```
+
+## Create Season Averages Data
+
+```{r}
+# Season Averages by Game
+nbaAvg <- nba %>%
+  drop_na() %>%
+  group_by(TEAM_ABBREVIATION, season) %>%
+  mutate(
+    avg_pts = cummean(PTS),
+    avg_fgm = cummean(FGM),
+    avg_fga = cummean(FGA),
+    avg_fgp = cummean(FG_PCT),
+    avg_fg3m = cummean(FG3M),
+    avg_fg3a = cummean(FG3A),
+    avg_fg3p = cummean(FG3_PCT),
+    avg_ftm = cummean(FTM),
+    avg_fta = cummean(FTA),
+    avg_ftp = cummean(FT_PCT),
+    avg_oreb = cummean(OREB),
+    avg_dreb = cummean(DREB),
+    avg_reb = cummean(REB),
+    avg_ast = cummean(AST),
+    avg_blk = cummean(BLK),
+    avg_stl = cummean(STL),
+    avg_tov = cummean(TOV),
+    avg_pf = cummean(PF),
+    avg_plus_min = cummean(PLUS_MINUS)
+  )
+
+# Home
+homeAvg <- home %>%
+  drop_na() %>%
+  group_by(TEAM_ABBREVIATION, season) %>%
+  mutate(
+    avg_pts = cummean(PTS),
+    avg_fgm = cummean(FGM),
+    avg_fga = cummean(FGA),
+    avg_fgp = cummean(FG_PCT),
+    avg_fg3m = cummean(FG3M),
+    avg_fg3a = cummean(FG3A),
+    avg_fg3p = cummean(FG3_PCT),
+    avg_ftm = cummean(FTM),
+    avg_fta = cummean(FTA),
+    avg_ftp = cummean(FT_PCT),
+    avg_oreb = cummean(OREB),
+    avg_dreb = cummean(DREB),
+    avg_reb = cummean(REB),
+    avg_ast = cummean(AST),
+    avg_blk = cummean(BLK),
+    avg_stl = cummean(STL),
+    avg_tov = cummean(TOV),
+    avg_pf = cummean(PF),
+    avg_plus_min = cummean(PLUS_MINUS)
+  )
+# Away
+awayAvg <- away %>%
+  drop_na() %>%
+  group_by(TEAM_ABBREVIATION, season) %>%
+  mutate(
+    avg_pts = cummean(PTS),
+    avg_fgm = cummean(FGM),
+    avg_fga = cummean(FGA),
+    avg_fgp = cummean(FG_PCT),
+    avg_fg3m = cummean(FG3M),
+    avg_fg3a = cummean(FG3A),
+    avg_fg3p = cummean(FG3_PCT),
+    avg_ftm = cummean(FTM),
+    avg_fta = cummean(FTA),
+    avg_ftp = cummean(FT_PCT),
+    avg_oreb = cummean(OREB),
+    avg_dreb = cummean(DREB),
+    avg_reb = cummean(REB),
+    avg_ast = cummean(AST),
+    avg_blk = cummean(BLK),
+    avg_stl = cummean(STL),
+    avg_tov = cummean(TOV),
+    avg_pf = cummean(PF),
+    avg_plus_min = cummean(PLUS_MINUS)
+  )
+
+# League averages by season
+leagueAvg <- games %>%
+  drop_na() %>%
+  group_by(season) %>%
+  summarise(
+    avg_pts = mean(PTS),
+    avg_fgm = mean(FGM),
+    avg_fga = mean(FGA),
+    avg_fgp = mean(FG_PCT),
+    avg_fg3m = mean(FG3M),
+    avg_fg3a = mean(FG3A),
+    avg_fg3p = mean(FG3_PCT),
+    avg_ftm = mean(FTM),
+    avg_fta = mean(FTA),
+    avg_ftp = mean(FT_PCT),
+    avg_oreb = mean(OREB),
+    avg_dreb = mean(DREB),
+    avg_reb = mean(REB),
+    avg_ast = mean(AST),
+    avg_blk = mean(BLK),
+    avg_stl = mean(STL),
+    avg_tov = mean(TOV),
+    avg_pf = mean(PF),
+    avg_plus_min = mean(PLUS_MINUS)
+  )
+```
+
+## Create Lag Version
+
+Using the lag for all averages because we want the season average prior to the current game. You cannot predict for the present/future if you're using that data.
+
+```{r}
+nbaAvgLag <- nbaAvg %>%
+  group_by(TEAM_ABBREVIATION, season) %>%
+  mutate(
+    lag_pts = lag(avg_pts),
+    lag_fgm = lag(avg_fgm),
+    lag_fga = lag(avg_fga),
+    lag_fgp = lag(avg_fgp),
+    lag_fg3m = lag(avg_fg3m),
+    lag_fg3a = lag(avg_fg3a),
+    lag_fg3p = lag(avg_fg3p),
+    lag_ftm = lag(avg_ftm),
+    lag_fta = lag(avg_fta),
+    lag_ftp = lag(avg_ftp),
+    lag_oreb = lag(avg_oreb),
+    lag_dreb = lag(avg_dreb),
+    lag_reb = lag(avg_reb),
+    lag_ast = lag(avg_ast),
+    lag_blk = lag(avg_blk),
+    lag_stl = lag(avg_stl),
+    lag_tov = lag(avg_tov),
+    lag_pf = lag(avg_pf),
+    lag_plus_min = lag(avg_plus_min),
+    lag_win_pct = lag(WIN_PCT),
+    WL = WL
+  ) %>%
+  select(
+    TEAM_ABBREVIATION, GAME_ID, WL, starts_with("lag")
+  ) %>%
+  mutate(
+    WL = case_when(
+      WL == 'W' ~ 'A',
+      T ~ 'B'
+    )
+  ) %>%
+  filter(!is.na(lag_pts))
+
+nbaAvgLagHome <- homeAvg %>%
+  group_by(TEAM_ABBREVIATION, season) %>%
+  mutate(
+    lag_pts = lag(avg_pts),
+    lag_fgm = lag(avg_fgm),
+    lag_fga = lag(avg_fga),
+    lag_fgp = lag(avg_fgp),
+    lag_fg3m = lag(avg_fg3m),
+    lag_fg3a = lag(avg_fg3a),
+    lag_fg3p = lag(avg_fg3p),
+    lag_ftm = lag(avg_ftm),
+    lag_fta = lag(avg_fta),
+    lag_ftp = lag(avg_ftp),
+    lag_oreb = lag(avg_oreb),
+    lag_dreb = lag(avg_dreb),
+    lag_reb = lag(avg_reb),
+    lag_ast = lag(avg_ast),
+    lag_blk = lag(avg_blk),
+    lag_stl = lag(avg_stl),
+    lag_tov = lag(avg_tov),
+    lag_pf = lag(avg_pf),
+    lag_plus_min = lag(avg_plus_min),
+    lag_win_pct = lag(WIN_PCT),
+    WL = WL
+  ) %>%
+  select(
+    TEAM_ABBREVIATION, GAME_ID, WL, starts_with("lag")
+  ) %>%
+  mutate(
+    WL = case_when(
+      WL == 'W' ~ 'A',
+      T ~ 'B'
+    )
+  ) %>%
+  filter(!is.na(lag_pts))
+
+nbaAvgLagAway <- awayAvg %>%
+  group_by(TEAM_ABBREVIATION, season) %>%
+  mutate(
+    lag_pts = lag(avg_pts),
+    lag_fgm = lag(avg_fgm),
+    lag_fga = lag(avg_fga),
+    lag_fgp = lag(avg_fgp),
+    lag_fg3m = lag(avg_fg3m),
+    lag_fg3a = lag(avg_fg3a),
+    lag_fg3p = lag(avg_fg3p),
+    lag_ftm = lag(avg_ftm),
+    lag_fta = lag(avg_fta),
+    lag_ftp = lag(avg_ftp),
+    lag_oreb = lag(avg_oreb),
+    lag_dreb = lag(avg_dreb),
+    lag_reb = lag(avg_reb),
+    lag_ast = lag(avg_ast),
+    lag_blk = lag(avg_blk),
+    lag_stl = lag(avg_stl),
+    lag_tov = lag(avg_tov),
+    lag_pf = lag(avg_pf),
+    lag_plus_min = lag(avg_plus_min),
+    lag_win_pct = lag(WIN_PCT),
+    WL = WL
+  ) %>%
+  select(
+    TEAM_ABBREVIATION, GAME_ID, WL, starts_with("lag")
+  ) %>%
+  mutate(
+    WL = case_when(
+      WL == 'W' ~ 'A',
+      T ~ 'B'
+    )
+  ) %>%
+  filter(!is.na(lag_pts))
+```
+
+# Create Two Versions of Data for Home/Away Teams
+
+```{r}
+# Rename columns
+colnames(nbaAvgLagHome) <- paste(colnames(nbaAvgLagHome), "_HOME", sep = "")
+colnames(nbaAvgLagAway) <- paste(colnames(nbaAvgLagAway), "_AWAY", sep = "")
+```
+
+## Join Data
+
+```{r}
+nba_games <- nbaAvgLagHome %>%
+  left_join(nbaAvgLagAway, by = c("GAME_ID_HOME" = "GAME_ID_AWAY"))
+```
+
+### Drop Columns & Rename Result
+
+```{r}
+# Drop the team abbreviations, redundant B cols and rename WL column
+drop_cols <- c("TEAM_ABBREVIATION_HOME", "TEAM_ABBREVIATION_AWAY", "WL_AWAY", "GAME_ID_HOME", "season_HOME", "season_AWAY")
+
+# Drop & rename. Need to ungroup for dropping abbreviation
+nba_games <- nba_games %>%
+  ungroup() %>%
+  select(-drop_cols) %>%
+  rename("WL" = "WL_HOME") %>%
+  mutate(
+    WL = case_when(
+      WL == 'A' ~ 1,
+      T ~ 0
+    )
+  )
+```
+
+## Write to Postgres Table
+
+```{r}
+# Create tables
+#dbCreateTable(pg, "nba_games", nba_games)
+#dbCreateTable(pg, "nba_avg_lag", nbaAvgLag)
+
+# Write tables
+dbWriteTable(pg, "nba_games", nba_games, overwrite = TRUE)
+dbWriteTable(pg, "nba_avg_lag", nbaAvgLag, overwrite = TRUE)
+```
+
+### Omit NA
+
+```{r}
+# Filter out missing data
+nba_games <- na.omit(nba_games)
+```
+
+# Modeling with Python
+## Load Libaries & Data
+```{python}
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+
+# Read in data
+nba = r.nba_games
+```
+
+## Split Data
+```{python}
+# Split into features vs labels
+x = nba.loc[:, nba.columns != 'WL']
+y = nba["WL"]
+# Split data
+x_train, x_test, y_train, y_test = train_test_split(x, y, test_size = 0.25, random_state=7)
+```
+
+## Modeling Test
+```{python}
+from numpy import std
+from numpy import mean
+from sklearn.model_selection import cross_val_score, KFold
+from sklearn.model_selection import RepeatedStratifiedKFold
+from sklearn.metrics import confusion_matrix
+import xgboost as xgb
+
+pd.set_option('mode.chained_assignment', 'warn')
+```
+### XGBoost
+```{python}
+# Create matrix for XGBoost
+data_dmatrix = xgb.DMatrix(data=x,label=y)
+
+# Set parameters
+params = {
+  'max_depth': 20,
+  'objective': 'binary:logistic',
+  'eta': 0.1
+}
+
+# Set evaluation metrics
+params['eval_metric'] = ['auc', 'rmse', 'error']
+
+# Set eval set
+eval_set = [(x_train, y_train), (x_test, y_test)]
+
+# Create model
+xgbm = XGBClassifier()
+
+# Fit model
+xgbm.fit(x_train, y_train)
+
+# CV
+cores = cross_val_score(xgbm, x_train, y_train, cv=5)
+print("Mean cross-validation score: %.2f" % cores.mean())
+
+kfold = KFold(n_splits=10, shuffle=True)
+kf_cv_scores = cross_val_score(xgbm, x_train, y_train, cv=kfold )
+print("K-fold CV average score: %.2f" % kf_cv_scores.mean())
+
+# Confusion matrix
+ypred = xgbm.predict(x_test)
+cm = confusion_matrix(y_test, ypred)
+print(cm)
+```
+
+# FILTER DATA FOR PREDICTIONS
+```{r}
+# Teams to predict today
+pred_set <- nbaAvg %>%
+  filter(SEASON_ID == 2020) %>%
+  group_by(TEAM_ABBREVIATION) %>%
+  filter(GAME_DATE == max(GAME_DATE)) %>%
+  select(
+    TEAM_ABBREVIATION, starts_with("avg"), WIN_PCT
+  ) %>%
+    rename(avg_win_pct = WIN_PCT)
+
+# Adjust column names
+colnames(pred_set) <- gsub("avg", "lag", colnames(pred_set))
+
+# Home Teams
+home = c("MIN", "NYK", "DEN", "IND", "TOR", "WAS")
+# Away Teams
+away = c("CLE", "LAC", "UTA", "PHI", "ORL", "BKN")
+
+# Create matchup df
+matchups <- as.data.frame(cbind(home, away))
+
+# Get home and away stats
+home_teams <- pred_set %>%
+  filter(TEAM_ABBREVIATION %in% home)
+
+away_teams <- pred_set %>%
+  filter(TEAM_ABBREVIATION %in% away)
+
+# Add names to columns
+colnames(home_teams) <- paste0(colnames(home_teams), "_HOME")
+colnames(away_teams) <- paste0(colnames(away_teams), "_AWAY")
+
+# Join to matchups
+matchups <- matchups %>%
+  left_join(home_teams, by = c("home" = "TEAM_ABBREVIATION_HOME")) %>%
+  left_join(away_teams, by = c("away" = "TEAM_ABBREVIATION_AWAY"))
+```
+
+# Make Predictions with Model
+```{python}
+# Read in matchup(s)
+games = r.matchups
+
+# Split into prediction variables & matchups
+matchups = games.loc[:, games.columns.isin(['home', 'away'])]
+features = games.loc[:, ~(games.columns.isin(['home', 'away']))]
+
+# Make a prediction
+game_pred = xgbm.predict(features)
+game_preds_prob = xgbm.predict_proba(features)
+
+# Convert to dataframe
+probs = pd.DataFrame(game_preds_prob, columns = ['away', 'home'])
+
+matchups.is_copy = False
+
+# Tie together
+matchups['PRED'] = game_pred
+matchups['HOME_PROB'] = probs['home']
+matchups['AWAY_PROB'] = probs['away']
+```
+
+
+
+
+
+
+
+
